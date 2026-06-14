@@ -7,8 +7,7 @@ import (
 )
 
 // These tests are offline: they exercise the URI driver's pure string functions
-// and the host wiring (mint, body, resolve), which need no network. The client's
-// HTTP behaviour is covered in bible_test.go.
+// and the host wiring (mint, body, resolve), which need no network.
 
 func TestDomainInfo(t *testing.T) {
 	info := Domain{}.Info()
@@ -24,53 +23,81 @@ func TestDomainInfo(t *testing.T) {
 }
 
 func TestClassify(t *testing.T) {
-	cases := []struct{ in, typ, id string }{
-		{"wiki/Go", "page", "wiki/Go"},
-		{"/about/", "page", "about"},
-		{"https://" + Host + "/team/contact", "page", "team/contact"},
+	cases := []struct {
+		in  string
+		typ string
+		id  string
+	}{
+		{"john 3:16", "reference", "john 3:16"},
+		{"romans 8:28-30", "reference", "romans 8:28-30"},
+		{"Genesis", "book", "Genesis"},
+		{"1 John", "book", "1 John"},
+		{"Revelation 22:21", "reference", "Revelation 22:21"},
 	}
 	for _, tc := range cases {
 		typ, id, err := Domain{}.Classify(tc.in)
-		if err != nil || typ != tc.typ || id != tc.id {
-			t.Errorf("Classify(%q) = (%q, %q, %v), want (%q, %q, nil)",
-				tc.in, typ, id, err, tc.typ, tc.id)
+		if err != nil {
+			t.Errorf("Classify(%q) unexpected error: %v", tc.in, err)
+			continue
+		}
+		if typ != tc.typ || id != tc.id {
+			t.Errorf("Classify(%q) = (%q, %q), want (%q, %q)",
+				tc.in, typ, id, tc.typ, tc.id)
 		}
 	}
 }
 
 func TestLocate(t *testing.T) {
-	got, err := Domain{}.Locate("page", "wiki/Go")
-	want := "https://" + Host + "/wiki/Go"
-	if err != nil || got != want {
-		t.Errorf("Locate = (%q, %v), want (%q, nil)", got, err, want)
+	cases := []struct {
+		uriType string
+		id      string
+		want    string
+	}{
+		{"reference", "john 3:16", "https://bible-api.com/john+3:16"},
+		{"reference", "romans 8:28-30", "https://bible-api.com/romans+8:28-30"},
+		{"book", "Genesis", "https://bible-api.com/Genesis+1:1"},
+		{"book", "1 John", "https://bible-api.com/1+John+1:1"},
+	}
+	for _, tc := range cases {
+		got, err := Domain{}.Locate(tc.uriType, tc.id)
+		if err != nil {
+			t.Errorf("Locate(%q, %q) unexpected error: %v", tc.uriType, tc.id, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("Locate(%q, %q) = %q, want %q", tc.uriType, tc.id, got, tc.want)
+		}
 	}
 }
 
-// TestHostWiring mounts the driver in a kit Host (the runtime ant drives) and
-// checks the round trip: a record mints to its URI, its body is readable, and a
-// bare id resolves back to the same URI. The init in domain.go registers the
-// domain, so kit.Open finds it.
+func TestLocateUnknownType(t *testing.T) {
+	_, err := Domain{}.Locate("unknown", "foo")
+	if err == nil {
+		t.Error("Locate(unknown) expected error, got nil")
+	}
+}
+
 func TestHostWiring(t *testing.T) {
 	h, err := kit.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	p := &Page{ID: "wiki/Go", URL: "https://" + Host + "/wiki/Go", Title: "Go", Body: "Go is a language."}
+	p := &Passage{Reference: "john 3:16", TranslationName: "World English Bible"}
 	u, err := h.Mint(p)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
-	if want := "bible://page/wiki/Go"; u.String() != want {
+	// kit URL-encodes spaces in URIs.
+	if want := "bible://reference/john%203:16"; u.String() != want {
 		t.Errorf("Mint = %q, want %q", u.String(), want)
 	}
 
-	if body, ok := h.Body(p); !ok || body == "" {
-		t.Errorf("Body = (%q, %v), want non-empty", body, ok)
+	got, err := h.ResolveOn("bible", "genesis 1:1")
+	if err != nil {
+		t.Fatalf("ResolveOn: %v", err)
 	}
-
-	got, err := h.ResolveOn("bible", "about")
-	if err != nil || got.String() != "bible://page/about" {
-		t.Errorf("ResolveOn = (%q, %v), want bible://page/about", got.String(), err)
+	if got.String() != "bible://reference/genesis%201:1" {
+		t.Errorf("ResolveOn = %q, want bible://reference/genesis%%201:1", got.String())
 	}
 }

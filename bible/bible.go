@@ -1,35 +1,55 @@
 // Package bible is the library behind the bible command line:
-// the HTTP client, request shaping, and the typed data models for bible.
+// the HTTP client, request shaping, and the typed data models for bible-api.com.
 //
 // The Client here is the spine every command shares. It sets a real
 // User-Agent, paces requests so a busy session stays polite, and retries the
 // transient failures (429 and 5xx) that any public site throws under load.
-// Build your endpoint calls and JSON decoding on top of it.
 package bible
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 )
 
-// DefaultUserAgent identifies the client to bible. A real, honest
-// User-Agent is both polite and the thing most likely to keep you unblocked.
+// DefaultUserAgent identifies the client to bible-api.com.
 const DefaultUserAgent = "bible/dev (+https://github.com/tamnd/bible-cli)"
 
-// Host is the site this client talks to, and the host the URI driver in
-// domain.go claims. The scaffold points it at bible.com; change it once you
-// know the real endpoints you want to read.
-const Host = "bible.com"
+// Host is the site this client talks to.
+const Host = "bible-api.com"
 
 // BaseURL is the root every request is built from.
 const BaseURL = "https://" + Host
 
-// Client talks to bible over HTTP.
+// Verse is a single verse from the Bible.
+type Verse struct {
+	BookID   string `json:"book_id"`
+	BookName string `json:"book_name"`
+	Chapter  int    `json:"chapter"`
+	Verse    int    `json:"verse"`
+	Text     string `json:"text"`
+}
+
+// Passage is a passage (one or more verses) returned by the API.
+type Passage struct {
+	Reference       string  `kit:"id" json:"reference"`
+	Verses          []Verse `json:"verses"`
+	TranslationName string  `json:"translation_name"`
+}
+
+// Book is a single book of the Bible.
+type Book struct {
+	ID        string `kit:"id" json:"id"`
+	Name      string `json:"name"`
+	Testament string `json:"testament"`
+	Chapters  int    `json:"chapters"`
+}
+
+// Client talks to bible-api.com over HTTP.
 type Client struct {
 	HTTP      *http.Client
 	UserAgent string
@@ -52,8 +72,7 @@ func NewClient() *Client {
 }
 
 // Get fetches url and returns the response body. It paces and retries according
-// to the client's settings. The caller owns nothing extra; the body is read
-// fully and closed here.
+// to the client's settings.
 func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt <= c.Retries; attempt++ {
@@ -123,78 +142,36 @@ func backoff(attempt int) time.Duration {
 	return d
 }
 
-// Page is the scaffold's one example record: a single page, addressed by the
-// path that names it on bible.com. It is a stand-in for the typed records you
-// will model from the real bible endpoints. The kit struct tags make it
-// addressable as a resource URI (see domain.go): ID is the URI id, and Body is
-// the long text `bible cat` and the Markdown export print.
-type Page struct {
-	ID    string `json:"id" kit:"id"`
-	URL   string `json:"url"`
-	Title string `json:"title,omitempty"`
-	Body  string `json:"body,omitempty" kit:"body"`
-}
-
-// GetPage fetches one page by its path (for example "wiki/Go") and returns it as
-// a record. The scaffold keeps a plain-text preview of the response as the body;
-// replace the parsing with the real fields once you know the endpoint's shape.
-func (c *Client) GetPage(ctx context.Context, path string) (*Page, error) {
-	path = strings.Trim(path, "/")
-	url := BaseURL + "/" + path
-	body, err := c.Get(ctx, url)
+// GetVerses fetches one or more verses by reference (e.g. "john 3:16" or
+// "romans 8:28-30"). If translation is non-empty it is passed as a query param.
+func (c *Client) GetVerses(ctx context.Context, reference, translation string) (*Passage, error) {
+	// bible-api.com uses + for spaces in the reference path segment.
+	ref := strings.ReplaceAll(strings.TrimSpace(reference), " ", "+")
+	u := BaseURL + "/" + ref
+	if translation != "" {
+		u += "?translation=" + translation
+	}
+	body, err := c.Get(ctx, u)
 	if err != nil {
 		return nil, err
 	}
-	return &Page{ID: path, URL: url, Title: path, Body: pageText(body)}, nil
+	var p Passage
+	if err := json.Unmarshal(body, &p); err != nil {
+		return nil, fmt.Errorf("decode passage: %w", err)
+	}
+	return &p, nil
 }
 
-// PageLinks fetches a page and returns the same-host pages it links to, as page
-// stubs. It shows the member-listing pattern the URI driver relies on: every
-// stub carries enough (an id and a URL) to be addressed and followed on its own.
-func (c *Client) PageLinks(ctx context.Context, path string, limit int) ([]*Page, error) {
-	path = strings.Trim(path, "/")
-	body, err := c.Get(ctx, BaseURL+"/"+path)
+// ListBooks returns all books of the Bible from the /data/web/books.json endpoint.
+func (c *Client) ListBooks(ctx context.Context) ([]Book, error) {
+	u := BaseURL + "/data/web/books.json"
+	body, err := c.Get(ctx, u)
 	if err != nil {
 		return nil, err
 	}
-	var out []*Page
-	seen := map[string]bool{}
-	for _, p := range linkPaths(body) {
-		if seen[p] {
-			continue
-		}
-		seen[p] = true
-		out = append(out, &Page{ID: p, URL: BaseURL + "/" + p})
-		if limit > 0 && len(out) >= limit {
-			break
-		}
+	var books []Book
+	if err := json.Unmarshal(body, &books); err != nil {
+		return nil, fmt.Errorf("decode books: %w", err)
 	}
-	return out, nil
-}
-
-var (
-	hrefRE = regexp.MustCompile(`href="(/[^":#?]+)"`)
-	tagRE  = regexp.MustCompile(`<[^>]+>`)
-)
-
-// linkPaths pulls the relative link targets out of an HTML response, so a list
-// op can turn each into an addressable page stub.
-func linkPaths(body []byte) []string {
-	var out []string
-	for _, m := range hrefRE.FindAllSubmatch(body, -1) {
-		if p := strings.Trim(string(m[1]), "/"); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-// pageText reduces an HTML response to a short plain-text preview, a stand-in
-// for the typed extract a real endpoint would hand you.
-func pageText(body []byte) string {
-	s := strings.Join(strings.Fields(tagRE.ReplaceAllString(string(body), " ")), " ")
-	if len(s) > 500 {
-		s = s[:500]
-	}
-	return s
+	return books, nil
 }
