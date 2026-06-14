@@ -1,0 +1,10 @@
+title       = "bible"
+baseURL     = "https://bible-cli.tamnd.com/"
+description = "A command line for bible."
+contentDir  = "content"
+outputDir   = "public"
+theme       = "tago-doks"
+syntaxHighlight = "true"
+
+[params]
+github = "https://github.com/tamnd/bible-cli"
